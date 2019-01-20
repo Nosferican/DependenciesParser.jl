@@ -1,0 +1,12 @@
+language: julia
+os:
+  - linux
+  - osx
+julia:
+  - 1.0
+notifications:
+  email: false
+after_success:
+  - julia --project -e 'import DependenciesParser; cd(dirname(pathof(DependenciesParser))); using Pkg; Pkg.add("Coverage"); using Coverage; Codecov.submit(process_folder())'
+  - julia --project=docs/ -e 'using Pkg; Pkg.instantiate()'
+  - julia --project=docs/ docs/make.jl
