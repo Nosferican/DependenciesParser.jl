@@ -7,6 +7,15 @@ julia:
 notifications:
   email: false
 after_success:
-  - julia --project -e 'import DependenciesParser; cd(dirname(pathof(DependenciesParser))); using Pkg; Pkg.add("Coverage"); using Coverage; Codecov.submit(process_folder())'
-  - julia --project=docs/ -e 'using Pkg; Pkg.instantiate()'
-  - julia --project=docs/ docs/make.jl
+  - julia --project -e 'using Pkg, DependenciesParser; cd(dirname(Pkg.pathof(DependenciesParser))); Pkg.add("Coverage"); using Coverage; Codecov.submit(Codecov.process_folder("."))'
+
+jobs:
+  include:
+    - stage: "Documentation"
+      julia: 1.0
+      os: linux
+      script:
+        - julia --project=docs/ -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd()));
+                                               Pkg.instantiate()'
+        - julia --project=docs/ docs/make.jl
+      after_success: skip
