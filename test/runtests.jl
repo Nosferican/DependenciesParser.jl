@@ -1,13 +1,10 @@
 using Test, DependenciesParser
 
-using Base.Iterators: flatten
-
-@testset "Basic test" begin
-    data = DependenciesParser.data
-    for pkg ∈ getproperty.(data, :name)
-        everydeps = dependencies(pkg)
-        @test dependencies(pkg, true) ⊆ everydeps
-        @test everydeps ==
-            sort!(union(everydeps, flatten(dependencies.(everydeps))))
+@testset "Base Test" begin
+    for pkg ∈ DependenciesParser.data
+        @inferred installable(pkg)
+        deps = installable(pkg)
+        @test last(installable(DependenciesParser.data[1], direct = true)) ⊆ last(deps)
+        first(deps) && break
     end
 end
