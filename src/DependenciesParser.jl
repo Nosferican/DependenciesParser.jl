@@ -4,112 +4,104 @@
     This package provides a quick way to access dependency information
 """
 module DependenciesParser
-    using Pkg: TOML.parsefile, Types.VersionRange
     using Base.Iterators: flatten
+    using Pkg: METADATA_compatible_uuid
+    using Pkg.Operations: load_package_data_raw, deps_graph, simplify_graph!, resolve
+    using Pkg.TOML: parsefile
+    using Pkg.Types: Context, Fixed, Requires, stdlib, UUID, uuid_julia, VersionRange,
+                     VersionSpec
 
     """
-        NameRepoVerDeps
-
-        Alias for NamedTuple struct used for name, repository, version, and dependencies.
+        All package names in the General registry
     """
-    const NameRepoVerDeps = NamedTuple{(:name, :repository, :version, :dependency),
-                                       Tuple{String,String,VersionNumber,Vector{String}}}
-    """
-        parse_package(name::AbstractString,
-                      julia::VersionNumber = VersionNumber(1))::NameRepoVerDeps
-
-        Returns information for latest compatible release of the package
-    """
-    function parse_package(name::AbstractString, julia::VersionNumber = VersionNumber(1))
-        dir = joinpath(homedir(), ".julia/registries/General", uppercase(name[1:1]), name)
-        version = joinpath(dir, "Versions.toml") |>
-            parsefile |>
-            keys |>
-            (k -> maximum(VersionNumber, k))
-        compat = joinpath(dir, "Compat.toml") |>
-            parsefile |>
-            (x -> [ ((name = n,
-                    version = VersionRange(v))
-                    for (n, v) in v) for (k, v) ∈ x if version ∈ VersionRange(k) ] ) |>
-            flatten |>
-            collect |>
-            sort!
-        if julia ∈ compat[findfirst(x-> isequal("julia", x.name), compat)].version
-            package = joinpath(dir, "Package.toml") |>
-                parsefile |>
-                (x -> (name = x["name"],
-                       uuid = x["uuid"],
-                       repo = replace(x["repo"], r"\.git$" => "")))
-            return (name = package.name,
-                    repository = package.repo,
-                    version = version,
-                    dependency = filter!(!isequal("julia"), getproperty.(compat, :name)))
-        end
-    end
-
-    """
-        alldeps(julia::VersionNumber = VersionNumber(1))::Vector{NameRepoVerDeps}
-
-        Returns information for all installable packages for the selected julia version
-    """
-    function alldeps(julia::VersionNumber = VersionNumber(1))
-        data = readdir.(joinpath.(homedir(), ".julia/registries/General", string.('A':'Z'))) |>
+    const data =
+        readdir.(joinpath.(homedir(), ".julia/registries/General", string.('A':'Z'))) |>
         flatten |>
         collect |>
-        (x -> filter!(x -> ~any(x ∈ ["julia", ".DS_Store"]) , x)) |>
-        (x -> mapreduce(x -> parse_package(x, julia), vcat, x)) |>
-        (x -> filter!(x -> ~isa(x, Nothing), x)) |>
-        (x -> convert(Vector{NamedTuple{(:name, :repository, :version, :dependency),
-                                        Tuple{String,String,VersionNumber,Vector{String}}}},
-                      x))
-        while true
-            Δ = length(data)
-            filter!(x -> all(x -> x ∈ getproperty.(data, :name), x.dependency), data)
-            Δ == length(data) && break
+        (x -> filter!(x -> ~any(x ∈ ["julia", ".DS_Store"]), x))
+    function find_repo(name)
+        dir = joinpath(homedir(), ".julia/registries/General", uppercase(name[1:1]), name)
+        toml = parsefile(joinpath(dir, "Package.toml"))
+        repo = replace(toml["repo"], r"\.git$" => "")
+        try
+            request("GET", repo)
+            true
+        catch
+            false
         end
-        data
     end
-
+    # Identify deleted repositories
+    # using HTTP: request
+    # available = Vector{Bool}(undef, length(data))
+    # @time for idx ∈ eachindex(available)
+    #     println(idx)
+    #     available[idx] = find_repo(data[idx])
+    # end
+    # Based on a cache solution from above on 2019-01-25
     """
-        dependencies(name::AbstractString,
-                     direct::Bool = false,
-                     data::VersionNumber = DependenciesParser.data)::Vector{String}
-
-        Returns all dependencies for the package (excludes stdlib)
-        When direct is true, only direct dependencies are returned
-        Dependencies.data = alldeps()
+        Packages that no longer exist (repositories have been deleted)
     """
-    function dependencies(name::AbstractString,
-                          direct::Bool = false,
-                          data::AbstractVector{<:NameRepoVerDeps} = DependenciesParser.data)
-        everyname = getproperty.(data, :name)
-        idx = findfirst(isequal(name), everyname)
-        isa(idx, Nothing) && throw(ArgumentError(string(name, "is not found in the registry.")))
-        visited = Vector{String}()
-        tovisit = copy(@view data[idx].dependency[1:end - 1])
-        while ~isempty(tovisit)
-            current = pop!(tovisit)
-            if current ∉ visited
-                for dependency ∈ data[findfirst(isequal(current), everyname)].dependency
-                    dependency ∉ visited && push!(tovisit, dependency)
-                end
-                push!(visited, current)
+    const deleted_repo =
+        ["Arduino", "ChainRecursive", "Chunks", "CombinatorialBandits", "ControlCore",
+         "DotOverloading", "DynamicalBilliardsPlotting", "GLUT", "GetC", "HTSLIB",
+         "KeyedTables", "LazyCall", "LazyContext", "LazyQuery", "LibGit2", "NumberedLines",
+         "OpenGL", "OrthogonalPolynomials", "Parts", "React", "RecurUnroll",
+         "RequirementVersions", "SDL", "SessionHacker", "Sparrow", "StringArrays",
+         "TypedBools", "ValuedTuples", "ZippedArrays"]
+    filter!(pkg -> pkg ∉ deleted_repo, data)
+    const deps = Dict{UUID,Dict{VersionRange,Dict{String,UUID}}}()
+    const compat = Dict{UUID,Dict{VersionRange,Dict{String,VersionSpec}}}()
+    const uuid_to_name = stdlib()
+    uuid_to_name[uuid_julia] = "julia"
+    const versions = Dict{UUID,Set{VersionNumber}}()
+    for name ∈ data
+        dir = joinpath(homedir(), ".julia/registries/General", uppercase(name[1:1]), name)
+        uuid = UUID(parsefile(joinpath(dir, "Package.toml"))["uuid"])
+        uuid_to_name[uuid] = name
+        versions[uuid] = Set(VersionNumber.(keys(parsefile(joinpath(dir, "Versions.toml")))))
+        deps[uuid] = load_package_data_raw(UUID, joinpath(dir, "Deps.toml"))
+        compat[uuid] = load_package_data_raw(VersionSpec, joinpath(dir, "Compat.toml"))
+    end
+    """
+        installable(pkg::AbstractString,
+                    julia::VersionNumber = VERSION;
+                    direct::Bool = false)::Tuple{Bool,Vector{String}}
+
+        Return whether the package is installable and the dependencies for the solved version.
+        If direct, only direct dependencies are returned.
+    """
+    function installable(pkg::AbstractString,
+                         julia = VERSION::VersionNumber;
+                         direct::Bool = false)
+        uuid = METADATA_compatible_uuid(pkg)
+        try
+            graph = deps_graph(Context(),
+                               uuid_to_name,
+                               Requires(uuid => VersionSpec()),
+                               Dict(uuid_julia => Fixed(julia)))
+            simplify_graph!(graph)
+            sol = get.(Ref(uuid_to_name),
+                       filter(!isequal(uuid), keys(resolve(graph))),
+                       nothing) |>
+                  sort!
+            if direct
+                secondary = reduce((x,y) -> vcat(last(x), last(y)),
+                                   installable.(sol)) |>
+                            unique!
+                sort!(filter!(dep -> dep ∉ secondary, sol))
             end
+            return true, sol::Vector{String}
+        catch
+            return false, Vector{String}([pkg])
         end
-        if direct
-            secondary = Vector{String}()
-            foreach(dep -> union!(secondary, dependencies(dep)), visited)
-            visited = setdiff(visited, secondary)
-        end
-        sort!(visited)
     end
-
-    """
-        const data = alldeps()
-    """
-    const data = Vector{NameRepoVerDeps}()
-
-    __init__() = append!(data, alldeps())
-
-    export alldeps, dependencies, NameRepoVerDeps
+    # Code to get all installable packages
+    # status = Vector{Tuple{Bool,Vector{String}}}()
+    # @time for (idx, pkg) ∈ enumerate(data)
+        # println(idx)
+        # push!(status, installable(pkg))
+    # end
+    # data[first.(status)]
+    # __init__() = append!(data, alldeps())
+    export installable
 end

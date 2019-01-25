@@ -4,7 +4,7 @@ keywords = ["Dependency", "Parser", "Ecosystem", "Metadata"]
 license = "ISC"
 description = "Dependency Parser for Julia"
 repository = "https://github.com/Nosferican/DependenciesParser.jl.git"
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
 Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
